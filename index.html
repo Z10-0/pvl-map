@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Выбор места на карте</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; flex-direction: column; font: 14px/1.4 system-ui, sans-serif;
+         background: var(--tg-theme-bg-color, #fff); color: var(--tg-theme-text-color, #111); }
+  #bar, #foot { display: flex; gap: 8px; padding: 8px; align-items: center; }
+  #q { flex: 1; padding: 9px; font-size: 16px; border: 1px solid #aaa; border-radius: 8px; min-width: 0; }
+  button { padding: 9px 14px; font-size: 16px; border: 0; border-radius: 8px; background: #2481cc; color: #fff; }
+  button[disabled] { background: #9aa5ad; }
+  #map { flex: 1; min-height: 0; }
+  #info { flex: 1; font-size: 13px; opacity: .85; }
+</style>
+</head>
+<body>
+<div id="bar"><input id="q" placeholder="Найти адрес на карте (по желанию)"><button id="go">Найти</button></div>
+<div id="map"></div>
+<div id="foot"><div id="info">Нажмите на карту, чтобы поставить метку</div><button id="ok" disabled>Готово</button></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+// начальное место можно передать в ссылке: ?lat=52.28&lng=76.96 (при смене места у существующей точки)
+const params = new URLSearchParams(location.search);
+const startLat = parseFloat(params.get("lat"));
+const startLng = parseFloat(params.get("lng"));
+const hasStart = Number.isFinite(startLat) && Number.isFinite(startLng);
+
+const map = L.map("map").setView(hasStart ? [startLat, startLng] : [52.2873, 76.9674], hasStart ? 17 : 13); // по умолчанию Павлодар
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+
+const info = document.getElementById("info");
+const ok = document.getElementById("ok");
+let marker = null;
+
+function show(ll) {
+  info.textContent = "Метка: " + ll.lat.toFixed(5) + ", " + ll.lng.toFixed(5) + " (можно перетащить)";
+  ok.disabled = false;
+}
+function setPoint(ll) {
+  if (marker) {
+    marker.setLatLng(ll);
+  } else {
+    marker = L.marker(ll, { draggable: true }).addTo(map);
+    marker.on("dragend", () => show(marker.getLatLng()));
+  }
+  show(ll);
+}
+map.on("click", (e) => setPoint(e.latlng));
+if (hasStart) setPoint(L.latLng(startLat, startLng));
+
+// поиск адреса только двигает карту; точное место отмечаете нажатием
+async function search() {
+  const q = document.getElementById("q").value.trim();
+  if (!q) return;
+  const c = map.getCenter();
+  const box = [c.lng - 0.3, c.lat + 0.2, c.lng + 0.3, c.lat - 0.2].join(",");
+  const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=ru&countrycodes=kz&viewbox=" +
+    box + "&q=" + encodeURIComponent(q);
+  try {
+    const r = await (await fetch(url)).json();
+    if (r[0]) { map.setView([Number(r[0].lat), Number(r[0].lon)], 18); info.textContent = "Найдено: нажмите на нужное место"; }
+    else info.textContent = "Не найдено. Двигайте карту и нажмите на нужное место";
+  } catch (e) {
+    info.textContent = "Поиск недоступен. Двигайте карту и нажмите на нужное место";
+  }
+}
+document.getElementById("go").onclick = search;
+document.getElementById("q").addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
+
+// «Готово»: координаты уходят боту, окно закрывается
+ok.onclick = () => {
+  if (!marker) return;
+  const ll = marker.getLatLng();
+  const data = JSON.stringify({ lat: Number(ll.lat.toFixed(6)), lng: Number(ll.lng.toFixed(6)) });
+  if (tg) tg.sendData(data);
+  else alert("Откройте эту страницу из бота: " + data);
+};
+</script>
+</body>
+</html>
