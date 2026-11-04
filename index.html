@@ -41,9 +41,20 @@ const params = new URLSearchParams(location.search);
 const startLat = parseFloat(params.get("lat"));
 const startLng = parseFloat(params.get("lng"));
 const hasStart = Number.isFinite(startLat) && Number.isFinite(startLng);
+const viewOnly = params.get("view") === "1"; // просмотр готовой точки, без выбора места
 
 const map = L.map("map").setView(hasStart ? [startLat, startLng] : [52.2873, 76.9674], hasStart ? 17 : 13); // по умолчанию Павлодар
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+// Карта: тайлы Geoapify (подписи полнее), без ключа — обычный OpenStreetMap
+const retina = L.Browser.retina ? "@2x" : "";
+L.tileLayer(
+  GEOAPIFY_KEY
+    ? `https://maps.geoapify.com/v1/tile/osm-bright/{z}/{x}/{y}${retina}.png?apiKey=${GEOAPIFY_KEY}`
+    : "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  {
+    maxZoom: GEOAPIFY_KEY ? 20 : 19,
+    attribution: GEOAPIFY_KEY ? "Powered by Geoapify | © OpenStreetMap" : "© OpenStreetMap",
+  }
+).addTo(map);
 
 const info = document.getElementById("info");
 const ok = document.getElementById("ok");
@@ -134,6 +145,12 @@ qbox.addEventListener("blur", () => setTimeout(hideSug, 200));
 map.on("click", hideSug);
 
 function search() { const q = qbox.value.trim(); if (q) suggest(q); }
+
+if (viewOnly) {
+  document.getElementById("bar").style.display = "none";
+  ok.style.display = "none";
+  info.textContent = "Это место точки на карте";
+}
 
 document.getElementById("go").onclick = search;
 qbox.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); search(); } });
