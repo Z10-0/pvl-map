@@ -12,6 +12,12 @@
          background: var(--tg-theme-bg-color, #fff); color: var(--tg-theme-text-color, #111); }
   #bar, #foot { display: flex; gap: 8px; padding: 8px; align-items: center; }
   #q { flex: 1; padding: 9px; font-size: 16px; border: 1px solid #aaa; border-radius: 8px; min-width: 0; }
+  #wrap { position: relative; flex: 1; min-width: 0; display: flex; }
+  #sug { position: absolute; top: 100%; left: 0; right: 0; z-index: 1000; margin-top: 4px;
+         background: var(--tg-theme-bg-color, #fff); border: 1px solid #bbb; border-radius: 8px;
+         max-height: 45vh; overflow-y: auto; display: none; box-shadow: 0 4px 14px rgba(0,0,0,.18); }
+  #sug div { padding: 10px 12px; border-bottom: 1px solid rgba(128,128,128,.2); font-size: 15px; }
+  #sug div:last-child { border-bottom: 0; }
   button { padding: 9px 14px; font-size: 16px; border: 0; border-radius: 8px; background: #2481cc; color: #fff; }
   button[disabled] { background: #9aa5ad; }
   #map { flex: 1; min-height: 0; }
@@ -19,11 +25,14 @@
 </style>
 </head>
 <body>
-<div id="bar"><input id="q" placeholder="Найти адрес на карте (по желанию)"><button id="go">Найти</button></div>
+<div id="bar"><div id="wrap"><input id="q" placeholder="Начните вводить адрес: Ло…" autocomplete="off"><div id="sug"></div></div><button id="go">Найти</button></div>
 <div id="map"></div>
 <div id="foot"><div id="info">Нажмите на карту, чтобы поставить метку</div><button id="ok" disabled>Готово</button></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
+// Ключ Geoapify: вставьте свой между кавычками. Пусто — подсказки от OpenStreetMap.
+const GEOAPIFY_KEY = "";
+
 const tg = window.Telegram && window.Telegram.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 
@@ -56,24 +65,78 @@ function setPoint(ll) {
 map.on("click", (e) => setPoint(e.latlng));
 if (hasStart) setPoint(L.latLng(startLat, startLng));
 
-// поиск адреса только двигает карту; точное место отмечаете нажатием
-async function search() {
-  const q = document.getElementById("q").value.trim();
-  if (!q) return;
+// подсказки адресов, как в навигаторе: Photon (бесплатный поиск по данным OpenStreetMap)
+const sug = document.getElementById("sug");
+const qbox = document.getElementById("q");
+let timer = null;
+let lastQuery = "";
+
+function hideSug() { sug.style.display = "none"; sug.innerHTML = ""; }
+
+function renderSug(items) {
+  sug.innerHTML = "";
+  if (!items.length) return hideSug();
+  for (const it of items) {
+    const row = document.createElement("div");
+    row.textContent = it.label;
+    row.onclick = () => {
+      qbox.value = it.label;
+      hideSug();
+      map.setView([it.lat, it.lng], 18);
+      setPoint(L.latLng(it.lat, it.lng)); // метку можно подвинуть
+    };
+    sug.appendChild(row);
+  }
+  sug.style.display = "block";
+}
+
+async function suggest(q) {
   const c = map.getCenter();
-  const box = [c.lng - 0.3, c.lat + 0.2, c.lng + 0.3, c.lat - 0.2].join(",");
-  const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=ru&countrycodes=kz&viewbox=" +
-    box + "&q=" + encodeURIComponent(q);
+  const box = [c.lng - 0.45, c.lat + 0.3, c.lng + 0.45, c.lat - 0.3];
+  const url = GEOAPIFY_KEY
+    ? "https://api.geoapify.com/v1/geocode/autocomplete?format=json&lang=ru&limit=8&type=amenity,building,street" +
+      "&filter=rect:" + box.join(",") + "&bias=proximity:" + c.lng + "," + c.lat +
+      "&text=" + encodeURIComponent(q) + "&apiKey=" + GEOAPIFY_KEY
+    : "https://photon.komoot.io/api/?lang=ru&limit=8&zoom=12&location_bias_scale=1&lat=" + c.lat + "&lon=" + c.lng +
+      "&q=" + encodeURIComponent(q);
   try {
     const r = await (await fetch(url)).json();
-    if (r[0]) { map.setView([Number(r[0].lat), Number(r[0].lon)], 18); info.textContent = "Найдено: нажмите на нужное место"; }
-    else info.textContent = "Не найдено. Двигайте карту и нажмите на нужное место";
+    const items = [];
+    const seen = new Set();
+    const rows = GEOAPIFY_KEY
+      ? (r.results || []).map((x) => ({ street: x.street || x.name, house: x.housenumber, district: x.district, lat: x.lat, lng: x.lon }))
+      : (r.features || []).map((f) => ({
+          street: f.properties?.street || f.properties?.name, house: f.properties?.housenumber,
+          district: f.properties?.district, lat: f.geometry?.coordinates?.[1], lng: f.geometry?.coordinates?.[0],
+        }));
+    for (const x of rows) {
+      if (x.lat == null || !x.street) continue;
+      if (Math.hypot((x.lat - c.lat) * 111, (x.lng - c.lng) * 111 * Math.cos(c.lat * Math.PI / 180)) > 45) continue;
+      const label = [x.street, x.house].filter(Boolean).join(" ") + (x.district ? ", " + x.district : "");
+      if (seen.has(label)) continue;
+      seen.add(label);
+      items.push({ label, lat: x.lat, lng: x.lng });
+      if (items.length >= 6) break;
+    }
+    if (qbox.value.trim() === q) renderSug(items);
   } catch (e) {
-    info.textContent = "Поиск недоступен. Двигайте карту и нажмите на нужное место";
+    info.textContent = "Подсказки недоступны: двигайте карту и нажмите на нужное место";
   }
 }
+
+qbox.addEventListener("input", () => {
+  const q = qbox.value.trim();
+  clearTimeout(timer);
+  if (q.length < 2) return hideSug();
+  timer = setTimeout(() => { if (q !== lastQuery) { lastQuery = q; suggest(q); } }, 300);
+});
+qbox.addEventListener("blur", () => setTimeout(hideSug, 200));
+map.on("click", hideSug);
+
+function search() { const q = qbox.value.trim(); if (q) suggest(q); }
+
 document.getElementById("go").onclick = search;
-document.getElementById("q").addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
+qbox.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); search(); } });
 
 // «Готово»: координаты уходят боту, окно закрывается
 ok.onclick = () => {
