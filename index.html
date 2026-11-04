@@ -4,15 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Выбор места на карте</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.css">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   html, body { height: 100%; margin: 0; }
   body { display: flex; flex-direction: column; font: 14px/1.4 system-ui, sans-serif;
          background: var(--tg-theme-bg-color, #fff); color: var(--tg-theme-text-color, #111); }
   #bar, #foot { display: flex; gap: 8px; padding: 8px; align-items: center; }
-  #q { flex: 1; padding: 9px; font-size: 16px; border: 1px solid #aaa; border-radius: 8px; min-width: 0; }
   #wrap { position: relative; flex: 1; min-width: 0; display: flex; }
+  #q { flex: 1; padding: 9px; font-size: 16px; border: 1px solid #aaa; border-radius: 8px; min-width: 0; }
   #sug { position: absolute; top: 100%; left: 0; right: 0; z-index: 1000; margin-top: 4px;
          background: var(--tg-theme-bg-color, #fff); border: 1px solid #bbb; border-radius: 8px;
          max-height: 45vh; overflow-y: auto; display: none; box-shadow: 0 4px 14px rgba(0,0,0,.18); }
@@ -28,61 +28,76 @@
 <div id="bar"><div id="wrap"><input id="q" placeholder="Начните вводить адрес: Ло…" autocomplete="off"><div id="sug"></div></div><button id="go">Найти</button></div>
 <div id="map"></div>
 <div id="foot"><div id="info">Нажмите на карту, чтобы поставить метку</div><button id="ok" disabled>Готово</button></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.js"></script>
 <script>
-// Ключ Geoapify: вставьте свой между кавычками. Пусто — подсказки от OpenStreetMap.
+// Ключ Geoapify: вставьте свой между кавычками. Пусто — карта и подсказки от OpenStreetMap.
 const GEOAPIFY_KEY = "2de8425afaee4c11a9fc749894083c24";
 
 const tg = window.Telegram && window.Telegram.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 
-// начальное место можно передать в ссылке: ?lat=52.28&lng=76.96 (при смене места у существующей точки)
+// начальное место передаётся в ссылке: ?lat=52.28&lng=76.96 (&view=1 — только посмотреть)
 const params = new URLSearchParams(location.search);
 const startLat = parseFloat(params.get("lat"));
 const startLng = parseFloat(params.get("lng"));
 const hasStart = Number.isFinite(startLat) && Number.isFinite(startLng);
-const viewOnly = params.get("view") === "1"; // просмотр готовой точки, без выбора места
+const viewOnly = params.get("view") === "1";
+const start = hasStart ? [startLng, startLat] : [76.9674, 52.2873]; // по умолчанию Павлодар
 
-const map = L.map("map").setView(hasStart ? [startLat, startLng] : [52.2873, 76.9674], hasStart ? 17 : 13); // по умолчанию Павлодар
-// Карта: тайлы Geoapify (подписи полнее), без ключа — обычный OpenStreetMap
-const retina = L.Browser.retina ? "@2x" : "";
-L.tileLayer(
-  GEOAPIFY_KEY
-    ? `https://maps.geoapify.com/v1/tile/osm-bright/{z}/{x}/{y}${retina}.png?apiKey=${GEOAPIFY_KEY}`
-    : "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-  {
-    maxZoom: GEOAPIFY_KEY ? 20 : 19,
-    attribution: GEOAPIFY_KEY ? "Powered by Geoapify | © OpenStreetMap" : "© OpenStreetMap",
+// Векторная карта: подписи можно перевести на русский (у растровой они «вшиты» в картинку)
+const style = GEOAPIFY_KEY
+  ? "https://maps.geoapify.com/v1/styles/osm-bright/style.json?apiKey=" + GEOAPIFY_KEY
+  : {
+      version: 8,
+      sources: { osm: { type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], tileSize: 256, attribution: "© OpenStreetMap" } },
+      layers: [{ id: "osm", type: "raster", source: "osm" }],
+    };
+
+const map = new maplibregl.Map({ container: "map", style, center: start, zoom: hasStart ? 16 : 12 });
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+
+// подписи на русском, где они есть; иначе остаётся местное название
+function localize() {
+  if (!GEOAPIFY_KEY) return;
+  for (const layer of map.getStyle().layers || []) {
+    if (layer.type !== "symbol") continue;
+    if (!map.getLayoutProperty(layer.id, "text-field")) continue;
+    try {
+      map.setLayoutProperty(layer.id, "text-field", ["coalesce", ["get", "name:ru"], ["get", "name"], ["get", "name:kk"]]);
+    } catch (e) {
+      /* слой без названий — пропускаем */
+    }
   }
-).addTo(map);
+}
+map.on("load", localize);
 
 const info = document.getElementById("info");
 const ok = document.getElementById("ok");
+const qbox = document.getElementById("q");
+const sug = document.getElementById("sug");
 let marker = null;
+
+const hideSug = () => { sug.style.display = "none"; sug.innerHTML = ""; };
 
 function show(ll) {
   info.textContent = "Метка: " + ll.lat.toFixed(5) + ", " + ll.lng.toFixed(5) + " (можно перетащить)";
   ok.disabled = false;
 }
-function setPoint(ll) {
+function setPoint(lng, lat) {
   if (marker) {
-    marker.setLatLng(ll);
+    marker.setLngLat([lng, lat]);
   } else {
-    marker = L.marker(ll, { draggable: true }).addTo(map);
-    marker.on("dragend", () => show(marker.getLatLng()));
+    marker = new maplibregl.Marker({ draggable: !viewOnly, color: "#e23b3b" }).setLngLat([lng, lat]).addTo(map);
+    marker.on("dragend", () => show(marker.getLngLat()));
   }
-  show(ll);
+  show(marker.getLngLat());
 }
-map.on("click", (e) => setPoint(e.latlng));
-if (hasStart) setPoint(L.latLng(startLat, startLng));
+if (!viewOnly) map.on("click", (e) => { hideSug(); setPoint(e.lngLat.lng, e.lngLat.lat); });
+if (hasStart) setPoint(start[0], start[1]);
 
-// подсказки адресов, как в навигаторе: Photon (бесплатный поиск по данным OpenStreetMap)
-const sug = document.getElementById("sug");
-const qbox = document.getElementById("q");
+// ---------- подсказки адресов ----------
 let timer = null;
 let lastQuery = "";
-
-function hideSug() { sug.style.display = "none"; sug.innerHTML = ""; }
 
 function renderSug(items) {
   sug.innerHTML = "";
@@ -93,8 +108,8 @@ function renderSug(items) {
     row.onclick = () => {
       qbox.value = it.label;
       hideSug();
-      map.setView([it.lat, it.lng], 18);
-      setPoint(L.latLng(it.lat, it.lng)); // метку можно подвинуть
+      map.flyTo({ center: [it.lng, it.lat], zoom: 17 });
+      setPoint(it.lng, it.lat);
     };
     sug.appendChild(row);
   }
@@ -103,30 +118,30 @@ function renderSug(items) {
 
 async function suggest(q) {
   const c = map.getCenter();
-  const box = [c.lng - 0.45, c.lat + 0.3, c.lng + 0.45, c.lat - 0.3];
   const url = GEOAPIFY_KEY
-    ? "https://api.geoapify.com/v1/geocode/autocomplete?format=json&lang=ru&limit=8&type=amenity,building,street" +
-      "&filter=rect:" + box.join(",") + "&bias=proximity:" + c.lng + "," + c.lat +
+    ? "https://api.geoapify.com/v1/geocode/autocomplete?format=json&lang=ru&limit=8" +
+      "&filter=circle:" + c.lng + "," + c.lat + ",25000&bias=proximity:" + c.lng + "," + c.lat +
       "&text=" + encodeURIComponent(q) + "&apiKey=" + GEOAPIFY_KEY
-    : "https://photon.komoot.io/api/?lang=ru&limit=8&zoom=12&location_bias_scale=1&lat=" + c.lat + "&lon=" + c.lng +
+    : "https://photon.komoot.io/api/?limit=8&zoom=12&location_bias_scale=1&lat=" + c.lat + "&lon=" + c.lng +
       "&q=" + encodeURIComponent(q);
   try {
     const r = await (await fetch(url)).json();
+    const rows = GEOAPIFY_KEY
+      ? (r.results || []).map(function (x) { return { street: x.street || x.name, house: x.housenumber, district: x.district, lat: x.lat, lng: x.lon }; })
+      : (r.features || []).map(function (f) {
+          const p = f.properties || {};
+          const g = f.geometry && f.geometry.coordinates;
+          return { street: p.street || p.name, house: p.housenumber, district: p.district, lat: g && g[1], lng: g && g[0] };
+        });
     const items = [];
     const seen = new Set();
-    const rows = GEOAPIFY_KEY
-      ? (r.results || []).map((x) => ({ street: x.street || x.name, house: x.housenumber, district: x.district, lat: x.lat, lng: x.lon }))
-      : (r.features || []).map((f) => ({
-          street: f.properties?.street || f.properties?.name, house: f.properties?.housenumber,
-          district: f.properties?.district, lat: f.geometry?.coordinates?.[1], lng: f.geometry?.coordinates?.[0],
-        }));
     for (const x of rows) {
       if (x.lat == null || !x.street) continue;
-      if (Math.hypot((x.lat - c.lat) * 111, (x.lng - c.lng) * 111 * Math.cos(c.lat * Math.PI / 180)) > 45) continue;
+      if (Math.hypot((x.lat - c.lat) * 111, (x.lng - c.lng) * 111 * Math.cos((c.lat * Math.PI) / 180)) > 45) continue;
       const label = [x.street, x.house].filter(Boolean).join(" ") + (x.district ? ", " + x.district : "");
       if (seen.has(label)) continue;
       seen.add(label);
-      items.push({ label, lat: x.lat, lng: x.lng });
+      items.push({ label: label, lat: x.lat, lng: x.lng });
       if (items.length >= 6) break;
     }
     if (qbox.value.trim() === q) renderSug(items);
@@ -141,24 +156,20 @@ qbox.addEventListener("input", () => {
   if (q.length < 2) return hideSug();
   timer = setTimeout(() => { if (q !== lastQuery) { lastQuery = q; suggest(q); } }, 300);
 });
+qbox.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); const q = qbox.value.trim(); if (q) suggest(q); } });
 qbox.addEventListener("blur", () => setTimeout(hideSug, 200));
-map.on("click", hideSug);
-
-function search() { const q = qbox.value.trim(); if (q) suggest(q); }
+document.getElementById("go").onclick = () => { const q = qbox.value.trim(); if (q) suggest(q); };
 
 if (viewOnly) {
   document.getElementById("bar").style.display = "none";
   ok.style.display = "none";
-  info.textContent = "Это место точки на карте";
+  info.textContent = "Это место на карте";
 }
-
-document.getElementById("go").onclick = search;
-qbox.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); search(); } });
 
 // «Готово»: координаты уходят боту, окно закрывается
 ok.onclick = () => {
   if (!marker) return;
-  const ll = marker.getLatLng();
+  const ll = marker.getLngLat();
   const data = JSON.stringify({ lat: Number(ll.lat.toFixed(6)), lng: Number(ll.lng.toFixed(6)) });
   if (tg) tg.sendData(data);
   else alert("Откройте эту страницу из бота: " + data);
